@@ -93,7 +93,14 @@ with st.sidebar:
     st.header("Einstellungen")
     page = st.radio("Modul", ["Übersicht", "FX Macro", "Saisonalität", "COT / Positioning", "NQ & ES", "Quant & Regression", "Datenquellen"])
     st.divider()
-    fred_key = st.text_input("FRED API-Key (optional)", type="password", help="Wird serverseitig in dieser Streamlit-Sitzung verwendet. Für Deployment besser Streamlit Secrets nutzen.")
+    try:
+        saved_fred_key = st.secrets.get("FRED_API_KEY", "")
+    except Exception:
+        saved_fred_key = ""
+    fred_key = st.text_input(
+        "FRED API-Key (optional)", value=saved_fred_key, type="password",
+        help="Hier eingeben oder sicher in Streamlit Secrets als FRED_API_KEY hinterlegen."
+    )
     st.caption(f"Ansicht erstellt: {utc_now()}")
     st.caption("Build: Starter v1.0 · Daten müssen geprüft werden.")
 
@@ -122,36 +129,64 @@ if page == "Übersicht":
 
 elif page == "FX Macro":
     st.subheader("G10 Currency Macro")
-    st.caption("Noch kein Live-Bias. Die Tabelle ist ein Datenmodell für die spätere Berechnung.")
-    fx = pd.DataFrame({
-        "CCY": G10,
-        "Policy / rates": ["Nicht verbunden"]*8,
-        "Inflation": ["Nicht verbunden"]*8,
-        "Labour": ["Nicht verbunden"]*8,
-        "Bonds": ["Nicht verbunden"]*8,
-        "COT": ["Nicht verbunden"]*8,
-        "Seasonality": ["Nicht verbunden"]*8,
-        "Bias": ["UNBESTIMMT"]*8,
-        "Confidence": ["—"]*8,
-    })
-    st.dataframe(fx, use_container_width=True, hide_index=True)
-    st.markdown("#### Makro-Daten über FRED testen")
-    st.caption("Beispielserie: FEDFUNDS = effektiver US-Leitzins; CPIAUCSL = US-CPI-Index; UNRATE = Arbeitslosenquote; DGS10 = US Treasury 10Y.")
-    series_id = st.selectbox("FRED-Serie", ["FEDFUNDS", "CPIAUCSL", "UNRATE", "DGS10", "DGS2", "T10YIE"])
-    if st.button("FRED-Serie laden"):
+    st.caption("Lädt verfügbare US-Makroserien aus FRED. Das ist noch kein vollständiger G10-Vergleich; andere Länder benötigen eigene Datenzuordnungen.")
+    fred_series = {
+        "FEDFUNDS": ("US Effective Federal Funds Rate", "% p.a."),
+        "CPIAUCSL": ("US CPI Index", "Index"),
+        "UNRATE": ("US Arbeitslosenquote", "%"),
+        "DGS10": ("US Treasury 10Y", "% p.a."),
+        "DGS2": ("US Treasury 2Y", "% p.a."),
+        "T10YIE": ("US 10Y Breakeven Inflation", "% p.a."),
+        "DTWEXBGS": ("US Dollar Index (breit, nominal)", "Index"),
+    }
+    if not fred_key:
+        st.info("Trage links deinen FRED API-Key ein. Danach kannst du die US-Makroindikatoren laden.")
+    selected = st.multiselect("Indikatoren", list(fred_series.keys()), default=["FEDFUNDS", "CPIAUCSL", "UNRATE", "DGS10", "DGS2"], format_func=lambda sid: f"{sid} — {fred_series[sid][0]}")
+    if st.button("US-Makroindikatoren laden", type="primary"):
         if not fred_key:
-            st.error("Bitte einen FRED API-Key in der Seitenleiste eintragen. Kostenlos registrierbar bei FRED.")
+            st.error("Bitte zuerst links einen FRED API-Key eintragen.")
+        elif not selected:
+            st.warning("Bitte mindestens einen Indikator auswählen.")
         else:
-            try:
-                df = get_fred_series(series_id, fred_key)
-                if df.empty:
-                    st.warning("Keine Beobachtungen zurückgegeben.")
-                else:
-                    st.success(f"{len(df)} Beobachtungen geladen. Letzter Datenpunkt: {df.iloc[-1]['date'].date()} — Wert {df.iloc[-1]['value']}")
-                    st.line_chart(df.set_index("date")["value"])
-                    st.dataframe(df.tail(10), use_container_width=True, hide_index=True)
-            except Exception as e:
-                st.error(f"FRED-Abfrage fehlgeschlagen: {e}")
+            summary, errors = [], []
+            with st.spinner("Lade FRED-Daten…"):
+                for sid in selected:
+                    try:
+                        series_df = get_fred_series(sid, fred_key)
+                        if series_df.empty:
+                            errors.append(f"{sid}: keine Beobachtungen zurückgegeben.")
+                            continue
+                        last = series_df.iloc[-1]
+                        prev = series_df.iloc[-2] if len(series_df) > 1 else None
+                        summary.append({"Serie": sid, "Indikator": fred_series[sid][0], "Letztes Datum": last["date"].date().isoformat(), "Letzter Wert": float(last["value"]), "Einheit": fred_series[sid][1], "Vorwert": float(prev["value"]) if prev is not None else None, "Beobachtungen": len(series_df)})
+                    except Exception as exc:
+                        errors.append(f"{sid}: {exc}")
+            if summary:
+                result = pd.DataFrame(summary)
+                st.success(f"{len(summary)} von {len(selected)} Serien erfolgreich geladen.")
+                st.dataframe(result, use_container_width=True, hide_index=True)
+                chosen = st.selectbox("Serie im Verlauf anzeigen", [r["Serie"] for r in summary], format_func=lambda sid: f"{sid} — {fred_series[sid][0]}")
+                try:
+                    history = get_fred_series(chosen, fred_key)
+                    st.line_chart(history.set_index("date")["value"])
+                    st.caption(f"Quelle: FRED · Serie {chosen} · letzter verfügbarer Datenpunkt {history.iloc[-1]['date'].date().isoformat()}. Frequenz und Aktualisierung hängen von der Serie ab; keine garantierten Echtzeitdaten.")
+                    st.dataframe(history.tail(12), use_container_width=True, hide_index=True)
+                except Exception as exc:
+                    st.error(f"Verlauf konnte nicht angezeigt werden: {exc}")
+            if errors:
+                st.warning("Einige Serien konnten nicht geladen werden: " + " | ".join(errors))
+    st.markdown("#### Status der G10-Abdeckung")
+    coverage = pd.DataFrame([
+        ["USD", "Teilweise verbunden", "US-Makroindikatoren oben über FRED ladbar"],
+        ["EUR", "Nicht verbunden", "EZB-/Eurostat-Serien separat integrieren"],
+        ["GBP", "Nicht verbunden", "BoE-/ONS-Serien separat integrieren"],
+        ["JPY", "Nicht verbunden", "BoJ-/Japan-Statistikserien separat integrieren"],
+        ["CHF", "Nicht verbunden", "SNB-/Schweizer Statistikserien separat integrieren"],
+        ["CAD", "Nicht verbunden", "BoC-/Statistics Canada-Serien separat integrieren"],
+        ["AUD", "Nicht verbunden", "RBA-/ABS-Serien separat integrieren"],
+        ["NZD", "Nicht verbunden", "RBNZ-/Stats NZ-Serien separat integrieren"],
+    ], columns=["CCY", "Status", "Hinweis"])
+    st.dataframe(coverage, use_container_width=True, hide_index=True)
 
 elif page == "Saisonalität":
     st.subheader("Monatliche Saisonalität")
