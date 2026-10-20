@@ -149,10 +149,12 @@ elif page == "FX Macro":
             st.warning("Bitte mindestens einen Indikator auswählen.")
         else:
             summary, errors = [], []
+            loaded_series = {}
             with st.spinner("Lade FRED-Daten…"):
                 for sid in selected:
                     try:
                         series_df = get_fred_series(sid, fred_key)
+                        loaded_series[sid] = series_df.copy()
                         if series_df.empty:
                             errors.append(f"{sid}: keine Beobachtungen zurückgegeben.")
                             continue
@@ -175,6 +177,73 @@ elif page == "FX Macro":
                     st.error(f"Verlauf konnte nicht angezeigt werden: {exc}")
             if errors:
                 st.warning("Einige Serien konnten nicht geladen werden: " + " | ".join(errors))
+
+            # Heuristic USD macro bias based only on selected, successfully loaded FRED series.
+            # This is a transparent educational proxy, not a forecast or trading signal.
+            if summary:
+                st.markdown("### USD-Makro-Bias")
+                st.caption("Heuristische Auswertung der geladenen Daten. Ohne Markterwartungen/Surprise-Daten ist dies kein verlässliches Handelssignal.")
+                factor_rows = []
+                weighted_points, available_weight = 0.0, 0.0
+
+                def _change(series_id, periods):
+                    data = loaded_series.get(series_id, pd.DataFrame())
+                    if data.empty or len(data) <= periods:
+                        return None
+                    return float(data.iloc[-1]["value"] - data.iloc[-1-periods]["value"])
+
+                # Rate/yield rises can support USD through yield differentials, but are ambiguous.
+                rules = {
+                    "FEDFUNDS": (20, 3, "Leitzins-Veränderung"),
+                    "DGS10": (15, 20, "10Y-Rendite-Veränderung"),
+                    "DGS2": (20, 20, "2Y-Rendite-Veränderung"),
+                    "UNRATE": (20, 3, "Arbeitslosenquote-Veränderung"),
+                }
+                for sid, (weight, periods, label) in rules.items():
+                    if sid not in loaded_series:
+                        continue
+                    delta = _change(sid, periods)
+                    if delta is None:
+                        continue
+                    # Signs are deliberately conservative; yields/rates are only weak directional proxies.
+                    if sid == "UNRATE":
+                        points = -1 if delta >= 0.2 else (1 if delta <= -0.2 else 0)
+                        interpretation = "steigende Arbeitslosigkeit" if points < 0 else ("sinkende Arbeitslosigkeit" if points > 0 else "weitgehend stabil")
+                    else:
+                        threshold = 0.10 if sid != "FEDFUNDS" else 0.10
+                        points = 1 if delta > threshold else (-1 if delta < -threshold else 0)
+                        interpretation = "gestiegen" if points > 0 else ("gefallen" if points < 0 else "weitgehend stabil")
+                    weighted_points += points * weight
+                    available_weight += weight
+                    factor_rows.append({"Faktor": label, "Veränderung": round(delta, 3), "Richtung (heuristisch)": "USD-stützend" if points > 0 else ("USD-belastend" if points < 0 else "Neutral"), "Hinweis": interpretation, "Gewicht": weight})
+
+                # CPI index itself is not inflation; use 12-observation change when available.
+                if "CPIAUCSL" in loaded_series:
+                    cpi = loaded_series["CPIAUCSL"]
+                    if len(cpi) > 12:
+                        yoy = (float(cpi.iloc[-1]["value"]) / float(cpi.iloc[-13]["value"]) - 1) * 100
+                        prior_yoy = (float(cpi.iloc[-2]["value"]) / float(cpi.iloc[-14]["value"]) - 1) * 100 if len(cpi) > 13 else yoy
+                        delta_yoy = yoy - prior_yoy
+                        # Falling inflation can reduce pressure for restrictive policy; sign remains ambiguous.
+                        points = 1 if delta_yoy > 0.15 else (-1 if delta_yoy < -0.15 else 0)
+                        weighted_points += points * 25
+                        available_weight += 25
+                        factor_rows.append({"Faktor": "CPI-Inflation (YoY, aus CPI-Index berechnet)", "Veränderung": round(delta_yoy, 3), "Richtung (heuristisch)": "potenziell USD-stützend" if points > 0 else ("potenziell USD-belastend" if points < 0 else "Neutral"), "Hinweis": f"Inflation ca. {yoy:.2f}% YoY; Kontext/Fed-Reaktion entscheidend", "Gewicht": 25})
+                    else:
+                        st.info("CPI-Bewertung übersprungen: Für eine Jahresrate werden mindestens 13 Monatswerte benötigt.")
+
+                score = round(100 * weighted_points / available_weight) if available_weight else 0
+                bias = "BULLISH" if score >= 25 else ("BEARISH" if score <= -25 else "NEUTRAL")
+                confidence = "NIEDRIG" if len(factor_rows) < 3 else "BEGRENZT"
+                m1, m2, m3 = st.columns(3)
+                m1.metric("USD-Makro-Bias", bias)
+                m2.metric("Heuristischer Score", f"{score:+d} / 100")
+                m3.metric("Signalqualität", confidence)
+                if factor_rows:
+                    st.dataframe(pd.DataFrame(factor_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Für den Bias fehlen ausreichend historische Beobachtungen. Bitte mehr Indikatoren auswählen.")
+                st.caption("Interpretation: Score nahe 0 = neutral; ab +25 bullish USD, ab −25 bearish USD. Dies bewertet nur einfache Datenveränderungen, nicht Erwartungen, Überraschungen oder die Gegenwährung. Nicht als alleinige Handelsgrundlage verwenden.")
     st.markdown("#### Status der G10-Abdeckung")
     coverage = pd.DataFrame([
         ["USD", "Teilweise verbunden", "US-Makroindikatoren oben über FRED ladbar"],
