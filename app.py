@@ -1,4 +1,4 @@
-                try:
+try:
                     history = get_fred_series(chosen, fred_key)
                     st.line_chart(history.set_index("date")["value"])
                     st.caption(f"Quelle: FRED · Serie {chosen} · letzter verfügbarer Datenpunkt {history.iloc[-1]['date'].date().isoformat()}. Frequenz und Aktualisierung hängen von der Serie ab; keine garantierten Echtzeitdaten.")
