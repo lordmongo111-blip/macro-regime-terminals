@@ -1,11 +1,14 @@
-        m1.metric("USD-Makro-Bias", bias)
-        m2.metric("Heuristischer Score", f"{score:+d} / 100")
-        m3.metric("Signalqualität", confidence)
-        if factor_rows:
-            st.dataframe(pd.DataFrame(factor_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("Für den Bias fehlen ausreichend historische Beobachtungen. Bitte mehr Indikatoren auswählen oder den Abruf erneut versuchen.")
-        st.caption("Interpretation: Score nahe 0 = neutral; ab +25 bullish USD, ab −25 bearish USD. Dies bewertet nur einfache Datenveränderungen, nicht Erwartungen, Überraschungen oder die Gegenwährung. Nicht als alleinige Handelsgrundlage verwenden.")
+                try:
+                    history = get_fred_series(chosen, fred_key)
+                    st.line_chart(history.set_index("date")["value"])
+                    st.caption(f"Quelle: FRED · Serie {chosen} · letzter verfügbarer Datenpunkt {history.iloc[-1]['date'].date().isoformat()}. Frequenz und Aktualisierung hängen von der Serie ab; keine garantierten Echtzeitdaten.")
+                    st.dataframe(history.tail(12), use_container_width=True, hide_index=True)
+                except Exception as exc:
+                    st.error(f"Verlauf konnte nicht angezeigt werden: {exc}")
+            if errors:
+                st.warning("Einige Serien konnten nicht geladen werden: " + " | ".join(errors))
+
+            st.info("Die geladenen US-Makroserien dienen derzeit nur der Dateninspektion. Sie erzeugen keinen Forex-Bias, da ein validierter Vergleich mit dem Gegenwährungsraum und Konsistenzchecks fehlen.")
     st.markdown("#### Status der G10-Abdeckung")
     coverage = pd.DataFrame([
         ["USD", "Teilweise verbunden", "US-Makroindikatoren oben über FRED ladbar"],
@@ -21,10 +24,7 @@
 
 elif page == "Saisonalität":
     st.subheader("Monatliche Saisonalität")
-    symbols = {
-        "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X",
-        "AUD/USD": "AUDUSD=X", "NQ (Nasdaq-100 proxy)": "NQ=F", "ES (S&P 500 proxy)": "ES=F"
-    }
+    symbols = {name: info["symbol"] for name, info in FX_PAIRS.items()}
     label = st.selectbox("Instrument / Proxy", list(symbols))
     years = st.selectbox("Historie", ["5y", "10y", "max"], index=1)
     if st.button("Historische Daten laden und berechnen"):
@@ -121,7 +121,7 @@ else:
         ["Zentralbankpfade", "Fed, EZB, BoE, BoJ, SNB, BoC, RBA, RBNZ", "Offizielle Veröffentlichungen; Parsing/Mapping erforderlich"],
         ["COT", "CFTC Public Reporting", "Wöchentlich; Reporttyp und Contract mapping validieren"],
         ["Historische Preise", "yfinance Wrapper / Yahoo Finance", "Nicht garantiert offiziell, vollständig, lizenziert oder echtzeitfähig"],
-        ["NQ / ES live", "Broker oder lizenzierter Marktdatenanbieter", "API/Account und Lizenzbedingungen abhängig vom Anbieter"],
+        ["FX-Kurse", "FX-Datenanbieter / Broker", "Aktualität, Historie und Lizenzbedingungen validieren"],
         ["Konsensdaten", "Separater Makro-Kalender-Anbieter", "Meist separat/lizenziert"]
     ], columns=["Bereich", "Quelle", "Hinweis"])
     st.dataframe(sources, use_container_width=True, hide_index=True)
